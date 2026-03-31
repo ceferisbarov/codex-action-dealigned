@@ -18,6 +18,10 @@ inputs:
     description: "OpenAI API key used by Codex."
     required: false
     default: ""
+  openrouter-api-key:
+    description: "OpenRouter API key used by Codex."
+    required: false
+    default: ""
   responses-api-endpoint:
     description: "Optional Responses API endpoint override, e.g. https://example.openai.azure.com/openai/v1/responses. Defaults to the proxy's built-in endpoint when empty."
     required: false
@@ -192,7 +196,7 @@ runs:
     # key do not end up in the memory of the `codex-responses-api-proxy`
     # process where environment variables are stored.
     - name: Start Responses API proxy
-      if: ${{ inputs['openai-api-key'] != '' && steps.start_proxy.outputs.server_info_file_exists == 'false' }}
+      if: ${{ inputs['openai-api-key'] != '' && inputs['openrouter-api-key'] == '' && steps.start_proxy.outputs.server_info_file_exists == 'false' }}
       env:
         SERVER_INFO_FILE: ${{ steps.derive_server_info.outputs.server_info_file }}
         PROXY_API_KEY: ${{ inputs['openai-api-key'] }}
@@ -214,7 +218,7 @@ runs:
         ) &
 
     - name: Wait for Responses API proxy
-      if: ${{ inputs['openai-api-key'] != '' && steps.start_proxy.outputs.server_info_file_exists == 'false' }}
+      if: ${{ inputs['openai-api-key'] != '' && inputs['openrouter-api-key'] == '' && steps.start_proxy.outputs.server_info_file_exists == 'false' }}
       shell: bash
       env:
         SERVER_INFO_FILE: ${{ steps.derive_server_info.outputs.server_info_file }}
@@ -238,7 +242,7 @@ runs:
     # This step has an output named `port`.
     - name: Read server info
       id: read_server_info
-      if: ${{ inputs['openai-api-key'] != '' || inputs.prompt != '' || inputs['prompt-file'] != '' }}
+      if: ${{ inputs['openai-api-key'] != '' && inputs['openrouter-api-key'] == '' }}
       shell: bash
       env:
         ACTION_PATH: ${{ github.action_path }}
@@ -246,7 +250,7 @@ runs:
       run: node "$ACTION_PATH/dist/main.js" read-server-info "$SERVER_INFO_FILE"
 
     - name: Write Codex proxy config
-      if: ${{ inputs['openai-api-key'] != '' }}
+      if: ${{ inputs['openai-api-key'] != '' && inputs['openrouter-api-key'] == '' }}
       shell: bash
       env:
         ACTION_PATH: ${{ github.action_path }}
@@ -259,8 +263,29 @@ runs:
           --port "$PROXY_PORT" \
           --safety-strategy "$SAFETY_STRATEGY"
 
+    - name: Write Codex OpenRouter config
+      if: ${{ inputs['openrouter-api-key'] != '' }}
+      shell: bash
+      env:
+        CODEX_HOME: ${{ steps.resolve_home.outputs.codex-home }}
+        OPENROUTER_KEY: ${{ inputs['openrouter-api-key'] }}
+        UPSTREAM_URL: ${{ inputs['responses-api-endpoint'] || 'https://openrouter.ai/api/v1' }}
+      run: |
+        echo "Writing direct OpenRouter configuration to $CODEX_HOME/config.toml"
+        mkdir -p "$CODEX_HOME"
+        cat > "$CODEX_HOME/config.toml" <<EOF
+        # Added by codex-action for OpenRouter.
+        model_provider = "openrouter"
+        
+        [model_providers.openrouter]
+        name = "OpenRouter"
+        base_url = "$UPSTREAM_URL"
+        env_key = "OPENROUTER_API_KEY"
+        wire_api = "responses"
+        EOF
+
     - name: Enable Linux user namespaces for bubblewrap
-      if: ${{ runner.os == 'Linux' && runner.environment == 'github-hosted' && (inputs['openai-api-key'] != '' || inputs.prompt != '' || inputs['prompt-file'] != '') }}
+      if: ${{ runner.os == 'Linux' && runner.environment == 'github-hosted' && (inputs['openai-api-key'] != '' || inputs['openrouter-api-key'] != '' || inputs.prompt != '' || inputs['prompt-file'] != '') }}
       shell: bash
       run: |
         set -euo pipefail
@@ -286,7 +311,7 @@ runs:
         fi
 
     - name: Drop sudo privilege, if appropriate
-      if: ${{ inputs['safety-strategy'] == 'drop-sudo' && inputs['openai-api-key'] != '' }}
+      if: ${{ inputs['safety-strategy'] == 'drop-sudo' && (inputs['openai-api-key'] != '' || inputs['openrouter-api-key'] != '') }}
       shell: bash
       env:
         ACTION_PATH: ${{ github.action_path }}
@@ -305,7 +330,7 @@ runs:
         esac
 
     - name: Verify sudo privilege removed
-      if: ${{ inputs['safety-strategy'] == 'drop-sudo' && inputs['openai-api-key'] != '' }}
+      if: ${{ inputs['safety-strategy'] == 'drop-sudo' && (inputs['openai-api-key'] != '' || inputs['openrouter-api-key'] != '') }}
       shell: bash
       run: |
         if sudo -n true 2>/dev/null; then
@@ -333,6 +358,7 @@ runs:
         CODEX_USER: ${{ inputs['codex-user'] }}
         ACTION_PATH: ${{ github.action_path }}
         FORCE_COLOR: 1
+        OPENROUTER_API_KEY: ${{ inputs['openrouter-api-key'] }}
       shell: bash
       run: |
         node "$ACTION_PATH/dist/main.js" run-codex-exec \
